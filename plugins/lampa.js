@@ -101,9 +101,9 @@
             ru: 'По умолчанию',
             en: 'Default'
         },
-        interface_mod_new_theme_netflix: {
-            ru: 'Netflix Style',
-            en: 'Netflix Style'
+        interface_mod_new_theme_neon: {
+            ru: 'Neon Style',
+            en: 'Neon Style'
         },
         interface_mod_new_stylize_titles: {
             ru: 'Новый стиль заголовков',
@@ -120,6 +120,22 @@
         interface_mod_new_watch_progress_desc: {
             ru: 'Показывать виджет с прогрессом просмотра',
             en: 'Show watch progress widget'
+        },
+        interface_mod_new_lazy_load: {
+            ru: 'Ленивая загрузка',
+            en: 'Lazy loading'
+        },
+        interface_mod_new_lazy_load_desc: {
+            ru: 'Загружать изображения только при появлении на экране',
+            en: 'Load images only when visible on screen'
+        },
+        interface_mod_new_webp_conversion: {
+            ru: 'WebP формат',
+            en: 'WebP format'
+        },
+        interface_mod_new_webp_conversion_desc: {
+            ru: 'Использовать WebP для постеров (экономия трафика)',
+            en: 'Use WebP for posters (saves traffic)'
         }
     });
 
@@ -132,9 +148,11 @@
         info_panel: Lampa.Storage.get('interface_mod_new_info_panel', true),
         colored_ratings: Lampa.Storage.get('interface_mod_new_colored_ratings', true),
         buttons_style_mode: Lampa.Storage.get('interface_mod_new_buttons_style_mode', 'default'),
-        theme: Lampa.Storage.get('interface_mod_new_theme_select', 'default'),
-        stylize_titles: Lampa.Storage.get('interface_mod_new_stylize_titles', false),
-        watch_progress: Lampa.Storage.get('interface_mod_new_watch_progress', true)
+        theme: Lampa.Storage.get('interface_mod_new_theme_select', 'neon'),
+        stylize_titles: Lampa.Storage.get('interface_mod_new_stylize_titles', true),
+        watch_progress: Lampa.Storage.get('interface_mod_new_watch_progress', true),
+        lazy_load: Lampa.Storage.get('interface_mod_new_lazy_load', true),
+        webp_conversion: Lampa.Storage.get('interface_mod_new_webp_conversion', true)
     };
 
     // ============================================================================
@@ -218,6 +236,43 @@
             }
             
             return 0;
+        },
+
+        // Конвертация URL в WebP
+        toWebP: function(url) {
+            if (!settings.webp_conversion || !url) return url;
+            
+            // Проверяем, поддерживается ли WebP
+            if (!this.isWebPSupported()) return url;
+            
+            // Если это TMDB изображение, используем параметр для WebP
+            if (url.indexOf('image.tmdb.org') !== -1) {
+                // TMDB не поддерживает WebP напрямую, но можно использовать прокси
+                return url;
+            }
+            
+            // Для других источников пытаемся заменить расширение
+            if (url.match(/\.(jpg|jpeg|png)$/i)) {
+                return url.replace(/\.(jpg|jpeg|png)$/i, '.webp');
+            }
+            
+            return url;
+        },
+
+        // Проверка поддержки WebP
+        isWebPSupported: function() {
+            if (typeof this._webpSupported !== 'undefined') {
+                return this._webpSupported;
+            }
+            
+            var elem = document.createElement('canvas');
+            if (!!(elem.getContext && elem.getContext('2d'))) {
+                this._webpSupported = elem.toDataURL('image/webp').indexOf('data:image/webp') === 0;
+            } else {
+                this._webpSupported = false;
+            }
+            
+            return this._webpSupported;
         }
     };
 
@@ -288,6 +343,370 @@
     };
 
     // ============================================================================
+    // ЛЕНИВАЯ ЗАГРУЗКА ИЗОБРАЖЕНИЙ
+    // ============================================================================
+    
+    var LazyLoader = {
+        observer: null,
+        loadedImages: new Set(),
+        
+        init: function() {
+            if (!settings.lazy_load) return;
+            
+            // Используем IntersectionObserver для определения видимости
+            var options = {
+                root: null,
+                rootMargin: '200px', // Начинаем загрузку за 200px до появления
+                threshold: 0.01
+            };
+            
+            var self = this;
+            this.observer = new IntersectionObserver(function(entries) {
+                entries.forEach(function(entry) {
+                    if (entry.isIntersecting) {
+                        self.loadImage(entry.target);
+                    }
+                });
+            }, options);
+            
+            // Обрабатываем существующие изображения
+            this.processExistingImages();
+            
+            // Слушаем новые изображения
+            DOMWatcher.addCallback(Utils.debounce(function(mutations) {
+                self.processNewImages(mutations);
+            }, 100));
+        },
+        
+        processExistingImages: function() {
+            var images = document.querySelectorAll('img[src*="image.tmdb.org"], .card__img, .full-start__img');
+            var self = this;
+            
+            images.forEach(function(img) {
+                self.setupLazyLoad(img);
+            });
+        },
+        
+        processNewImages: function(mutations) {
+            var self = this;
+            
+            mutations.forEach(function(mutation) {
+                if (mutation.addedNodes && mutation.addedNodes.length) {
+                    mutation.addedNodes.forEach(function(node) {
+                        if (node.nodeType === 1) {
+                            if (node.tagName === 'IMG') {
+                                self.setupLazyLoad(node);
+                            }
+                            
+                            var images = node.querySelectorAll('img[src*="image.tmdb.org"], .card__img, .full-start__img');
+                            images.forEach(function(img) {
+                                self.setupLazyLoad(img);
+                            });
+                        }
+                    });
+                }
+            });
+        },
+        
+        setupLazyLoad: function(img) {
+            if (this.loadedImages.has(img)) return;
+            
+            var src = img.getAttribute('src') || img.getAttribute('data-src');
+            if (!src) return;
+            
+            // Сохраняем оригинальный URL
+            if (!img.hasAttribute('data-original-src')) {
+                img.setAttribute('data-original-src', src);
+                
+                // Конвертируем в WebP если нужно
+                var webpSrc = Utils.toWebP(src);
+                img.setAttribute('data-src', webpSrc);
+                
+                // Устанавливаем placeholder
+                img.setAttribute('src', 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"%3E%3Crect width="400" height="600" fill="%23222"%3E%3C/rect%3E%3C/svg%3E');
+                img.style.backgroundColor = '#1a1a1a';
+            }
+            
+            this.observer.observe(img);
+        },
+        
+        loadImage: function(img) {
+            if (this.loadedImages.has(img)) return;
+            
+            var src = img.getAttribute('data-src');
+            if (!src) return;
+            
+            var self = this;
+            var tempImg = new Image();
+            
+            tempImg.onload = function() {
+                img.src = src;
+                img.style.backgroundColor = '';
+                img.classList.add('lazy-loaded');
+                self.loadedImages.add(img);
+                self.observer.unobserve(img);
+            };
+            
+            tempImg.onerror = function() {
+                // Если WebP не загрузился, пробуем оригинал
+                var originalSrc = img.getAttribute('data-original-src');
+                if (originalSrc && originalSrc !== src) {
+                    img.src = originalSrc;
+                }
+                self.loadedImages.add(img);
+                self.observer.unobserve(img);
+            };
+            
+            tempImg.src = src;
+        },
+        
+        destroy: function() {
+            if (this.observer) {
+                this.observer.disconnect();
+            }
+            this.loadedImages.clear();
+        }
+    };
+
+    // ============================================================================
+    // D-PAD НАВИГАЦИЯ С ВИЗУАЛЬНЫМ ФИДБЭКОМ
+    // ============================================================================
+    
+    var DPadNavigation = {
+        currentFocused: null,
+        
+        init: function() {
+            this.addStyles();
+            this.enhanceFocusVisibility();
+            
+            // Слушаем изменения фокуса
+            var self = this;
+            DOMWatcher.addCallback(function(mutations) {
+                self.enhanceFocusVisibility();
+            });
+            
+            // Обработка клавиш
+            document.addEventListener('keydown', function(e) {
+                self.handleKeyPress(e);
+            });
+        },
+        
+        addStyles: function() {
+            if (document.getElementById('dpad-navigation-styles')) return;
+            
+            var style = document.createElement('style');
+            style.id = 'dpad-navigation-styles';
+            style.textContent = `
+                /* Неоновый фокус для карточек */
+                .card.focus .card__view,
+                .card.hover .card__view {
+                    box-shadow: 
+                        0 0 20px rgba(0, 255, 255, 0.6),
+                        0 0 40px rgba(0, 255, 255, 0.4),
+                        0 0 60px rgba(0, 255, 255, 0.2),
+                        inset 0 0 20px rgba(0, 255, 255, 0.1) !important;
+                    border: 2px solid #00ffff !important;
+                    transform: scale(1.08);
+                }
+                
+                /* Неоновый фокус для кнопок */
+                .selector.focus,
+                button.focus,
+                .full-start__button.focus,
+                .settings-param.focus,
+                .menu__item.focus {
+                    box-shadow: 
+                        0 0 15px rgba(255, 0, 255, 0.6),
+                        0 0 30px rgba(255, 0, 255, 0.4),
+                        inset 0 0 15px rgba(255, 0, 255, 0.2) !important;
+                    border: 2px solid #ff00ff !important;
+                    background: linear-gradient(135deg, rgba(255, 0, 255, 0.2), rgba(0, 255, 255, 0.2)) !important;
+                }
+                
+                /* Неоновый фокус для элементов меню */
+                .menu__item.focus .menu__ico,
+                .menu__item.hover .menu__ico {
+                    filter: drop-shadow(0 0 10px #00ffff) drop-shadow(0 0 20px #00ffff);
+                }
+                
+                /* Пульсация для активного элемента */
+                .card.focus .card__view::before,
+                .selector.focus::before,
+                button.focus::before {
+                    content: '';
+                    position: absolute;
+                    top: -4px;
+                    left: -4px;
+                    right: -4px;
+                    bottom: -4px;
+                    border-radius: inherit;
+                    background: linear-gradient(45deg, #00ffff, #ff00ff, #00ffff);
+                    z-index: -1;
+                    opacity: 0.3;
+                }
+                
+                /* Breadcrumbs для навигации */
+                .navigation-breadcrumbs {
+                    position: fixed;
+                    top: 20px;
+                    left: 20px;
+                    background: rgba(0, 0, 0, 0.8);
+                    padding: 10px 20px;
+                    border-radius: 20px;
+                    border: 1px solid #00ffff;
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+                    z-index: 10000;
+                    font-size: 1.2em;
+                    color: #00ffff;
+                    font-family: 'Courier New', monospace;
+                }
+                
+                /* Индикатор направления */
+                .direction-indicator {
+                    position: fixed;
+                    bottom: 40px;
+                    right: 40px;
+                    width: 80px;
+                    height: 80px;
+                    background: rgba(0, 0, 0, 0.8);
+                    border-radius: 50%;
+                    border: 2px solid #00ffff;
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 10000;
+                    opacity: 0;
+                    pointer-events: none;
+                }
+                
+                .direction-indicator.active {
+                    opacity: 1;
+                }
+                
+                .direction-indicator svg {
+                    width: 40px;
+                    height: 40px;
+                    fill: #00ffff;
+                    filter: drop-shadow(0 0 5px #00ffff);
+                }
+                
+                /* Плавные переходы */
+                .card, .selector, button, .menu__item {
+                    transition: transform 0.15s ease, box-shadow 0.15s ease, border 0.15s ease;
+                }
+            `;
+            document.head.appendChild(style);
+            
+            // Добавляем breadcrumbs
+            this.createBreadcrumbs();
+            this.createDirectionIndicator();
+        },
+        
+        createBreadcrumbs: function() {
+            if (document.querySelector('.navigation-breadcrumbs')) return;
+            
+            var breadcrumbs = document.createElement('div');
+            breadcrumbs.className = 'navigation-breadcrumbs';
+            breadcrumbs.textContent = 'Главная';
+            document.body.appendChild(breadcrumbs);
+        },
+        
+        createDirectionIndicator: function() {
+            if (document.querySelector('.direction-indicator')) return;
+            
+            var indicator = document.createElement('div');
+            indicator.className = 'direction-indicator';
+            indicator.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2l9 9-9 9V2z"/></svg>';
+            document.body.appendChild(indicator);
+        },
+        
+        enhanceFocusVisibility: function() {
+            var focusedElement = document.querySelector('.focus');
+            
+            if (focusedElement && focusedElement !== this.currentFocused) {
+                this.currentFocused = focusedElement;
+                this.updateBreadcrumbs(focusedElement);
+                
+                // Прокручиваем к элементу если нужно
+                this.scrollToFocused(focusedElement);
+            }
+        },
+        
+        updateBreadcrumbs: function(element) {
+            var breadcrumbs = document.querySelector('.navigation-breadcrumbs');
+            if (!breadcrumbs) return;
+            
+            var path = 'Главная';
+            
+            if (element.closest('.menu')) {
+                path = 'Меню';
+            } else if (element.closest('.full-start')) {
+                path = 'Детали фильма';
+            } else if (element.closest('.settings')) {
+                path = 'Настройки';
+            } else if (element.closest('.search')) {
+                path = 'Поиск';
+            } else if (element.classList.contains('card')) {
+                var title = element.querySelector('.card__title');
+                if (title) {
+                    path = 'Каталог > ' + title.textContent.substring(0, 20);
+                }
+            }
+            
+            breadcrumbs.textContent = path;
+        },
+        
+        scrollToFocused: function(element) {
+            var rect = element.getBoundingClientRect();
+            var windowHeight = window.innerHeight;
+            var windowWidth = window.innerWidth;
+            
+            // Если элемент не полностью видим, прокручиваем
+            if (rect.top < 100 || rect.bottom > windowHeight - 100 ||
+                rect.left < 100 || rect.right > windowWidth - 100) {
+                element.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center',
+                    inline: 'center'
+                });
+            }
+        },
+        
+        handleKeyPress: function(e) {
+            var indicator = document.querySelector('.direction-indicator');
+            if (!indicator) return;
+            
+            var arrow = indicator.querySelector('svg');
+            var rotation = 0;
+            
+            switch(e.keyCode) {
+                case 38: // Up
+                    rotation = -90;
+                    break;
+                case 40: // Down
+                    rotation = 90;
+                    break;
+                case 37: // Left
+                    rotation = 180;
+                    break;
+                case 39: // Right
+                    rotation = 0;
+                    break;
+                default:
+                    return;
+            }
+            
+            arrow.style.transform = 'rotate(' + rotation + 'deg)';
+            indicator.classList.add('active');
+            
+            setTimeout(function() {
+                indicator.classList.remove('active');
+            }, 300);
+        }
+    };
+
+    // ============================================================================
     // МЕНЕДЖЕР ЛЕЙБЛОВ
     // ============================================================================
     
@@ -319,24 +738,33 @@
             style.textContent = `
                 .content-label-new {
                     position: absolute !important;
-                    left: 0.3em !important;
-                    bottom: 0.3em !important;
-                    background: rgba(0,0,0,0.5) !important;
+                    left: 0.5em !important;
+                    bottom: 0.5em !important;
+                    background: linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(255, 0, 255, 0.3)) !important;
+                    backdrop-filter: blur(10px);
                     color: #fff !important;
-                    font-size: 1.3em !important;
-                    padding: 0.2em 0.5em !important;
-                    border-radius: 1em !important;
+                    font-size: 1.2em !important;
+                    padding: 0.3em 0.8em !important;
+                    border-radius: 20px !important;
                     font-weight: 700;
                     z-index: 10 !important;
+                    border: 1px solid rgba(255, 255, 255, 0.3);
+                    box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+                    text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
                 }
+                
                 .serial-label-new {
-                    background: rgba(0,0,0,0.5) !important;
-                    color: #3498db !important;
+                    background: linear-gradient(135deg, rgba(0, 255, 255, 0.4), rgba(0, 128, 255, 0.4)) !important;
+                    border-color: #00ffff !important;
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.6);
                 }
+                
                 .movie-label-new {
-                    background: rgba(0,0,0,0.5) !important;
-                    color: #2ecc71 !important;
+                    background: linear-gradient(135deg, rgba(255, 0, 255, 0.4), rgba(255, 0, 128, 0.4)) !important;
+                    border-color: #ff00ff !important;
+                    box-shadow: 0 0 20px rgba(255, 0, 255, 0.6);
                 }
+                
                 body[data-movie-labels-new="on"] .card--tv .card__type {
                     display: none !important;
                 }
@@ -502,29 +930,29 @@
     
     var InfoPanel = {
         colors: {
-            seasons: { bg: 'rgba(52, 152, 219, 0.8)', text: 'white' },
-            episodes: { bg: 'rgba(46, 204, 113, 0.8)', text: 'white' },
-            duration: { bg: 'rgba(52, 152, 219, 0.8)', text: 'white' },
-            next: { bg: 'rgba(230, 126, 34, 0.8)', text: 'white' },
+            seasons: { bg: 'linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 200, 255, 0.3))', text: '#00ffff', border: '#00ffff' },
+            episodes: { bg: 'linear-gradient(135deg, rgba(255, 0, 255, 0.3), rgba(200, 0, 255, 0.3))', text: '#ff00ff', border: '#ff00ff' },
+            duration: { bg: 'linear-gradient(135deg, rgba(0, 255, 128, 0.3), rgba(0, 200, 100, 0.3))', text: '#00ff80', border: '#00ff80' },
+            next: { bg: 'linear-gradient(135deg, rgba(255, 128, 0, 0.3), rgba(255, 100, 0, 0.3))', text: '#ff8000', border: '#ff8000' },
             genres: {
-                'Боевик': { bg: 'rgba(231, 76, 60, 0.8)', text: 'white' },
-                'Приключения': { bg: 'rgba(39, 174, 96, 0.8)', text: 'white' },
-                'Мультфильм': { bg: 'rgba(155, 89, 182, 0.8)', text: 'white' },
-                'Комедия': { bg: 'rgba(241, 196, 15, 0.8)', text: 'black' },
-                'Криминал': { bg: 'rgba(192, 57, 43, 0.8)', text: 'white' },
-                'Документальный': { bg: 'rgba(22, 160, 133, 0.8)', text: 'white' },
-                'Драма': { bg: 'rgba(142, 68, 173, 0.8)', text: 'white' },
-                'Семейный': { bg: 'rgba(46, 204, 113, 0.8)', text: 'white' },
-                'Фэнтези': { bg: 'rgba(155, 89, 182, 0.8)', text: 'white' },
-                'История': { bg: 'rgba(211, 84, 0, 0.8)', text: 'white' },
-                'Ужасы': { bg: 'rgba(192, 57, 43, 0.8)', text: 'white' },
-                'Музыка': { bg: 'rgba(52, 152, 219, 0.8)', text: 'white' },
-                'Детектив': { bg: 'rgba(52, 73, 94, 0.8)', text: 'white' },
-                'Мелодрама': { bg: 'rgba(233, 30, 99, 0.8)', text: 'white' },
-                'Фантастика': { bg: 'rgba(41, 128, 185, 0.8)', text: 'white' },
-                'Триллер': { bg: 'rgba(192, 57, 43, 0.8)', text: 'white' },
-                'Военный': { bg: 'rgba(127, 140, 141, 0.8)', text: 'white' },
-                'Вестерн': { bg: 'rgba(211, 84, 0, 0.8)', text: 'white' }
+                'Боевик': { bg: 'linear-gradient(135deg, rgba(255, 0, 0, 0.3), rgba(200, 0, 0, 0.3))', text: '#ff0000', border: '#ff0000' },
+                'Приключения': { bg: 'linear-gradient(135deg, rgba(0, 255, 128, 0.3), rgba(0, 200, 100, 0.3))', text: '#00ff80', border: '#00ff80' },
+                'Мультфильм': { bg: 'linear-gradient(135deg, rgba(255, 0, 255, 0.3), rgba(200, 0, 200, 0.3))', text: '#ff00ff', border: '#ff00ff' },
+                'Комедия': { bg: 'linear-gradient(135deg, rgba(255, 255, 0, 0.3), rgba(200, 200, 0, 0.3))', text: '#ffff00', border: '#ffff00' },
+                'Криминал': { bg: 'linear-gradient(135deg, rgba(128, 0, 0, 0.3), rgba(100, 0, 0, 0.3))', text: '#ff4444', border: '#ff4444' },
+                'Документальный': { bg: 'linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 200, 200, 0.3))', text: '#00ffff', border: '#00ffff' },
+                'Драма': { bg: 'linear-gradient(135deg, rgba(128, 0, 255, 0.3), rgba(100, 0, 200, 0.3))', text: '#8800ff', border: '#8800ff' },
+                'Семейный': { bg: 'linear-gradient(135deg, rgba(0, 255, 128, 0.3), rgba(0, 200, 100, 0.3))', text: '#00ff80', border: '#00ff80' },
+                'Фэнтези': { bg: 'linear-gradient(135deg, rgba(255, 0, 255, 0.3), rgba(200, 0, 200, 0.3))', text: '#ff00ff', border: '#ff00ff' },
+                'История': { bg: 'linear-gradient(135deg, rgba(255, 128, 0, 0.3), rgba(200, 100, 0, 0.3))', text: '#ff8000', border: '#ff8000' },
+                'Ужасы': { bg: 'linear-gradient(135deg, rgba(128, 0, 0, 0.3), rgba(100, 0, 0, 0.3))', text: '#ff0000', border: '#ff0000' },
+                'Музыка': { bg: 'linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 200, 200, 0.3))', text: '#00ffff', border: '#00ffff' },
+                'Детектив': { bg: 'linear-gradient(135deg, rgba(0, 128, 255, 0.3), rgba(0, 100, 200, 0.3))', text: '#0080ff', border: '#0080ff' },
+                'Мелодрама': { bg: 'linear-gradient(135deg, rgba(255, 0, 128, 0.3), rgba(200, 0, 100, 0.3))', text: '#ff0080', border: '#ff0080' },
+                'Фантастика': { bg: 'linear-gradient(135deg, rgba(0, 128, 255, 0.3), rgba(0, 100, 200, 0.3))', text: '#0080ff', border: '#0080ff' },
+                'Триллер': { bg: 'linear-gradient(135deg, rgba(255, 0, 0, 0.3), rgba(200, 0, 0, 0.3))', text: '#ff0000', border: '#ff0000' },
+                'Военный': { bg: 'linear-gradient(135deg, rgba(128, 128, 128, 0.3), rgba(100, 100, 100, 0.3))', text: '#888888', border: '#888888' },
+                'Вестерн': { bg: 'linear-gradient(135deg, rgba(255, 128, 0, 0.3), rgba(200, 100, 0, 0.3))', text: '#ff8000', border: '#ff8000' }
             }
         },
         
@@ -554,16 +982,16 @@
             details.innerHTML = '';
             
             var newContainer = document.createElement('div');
-            newContainer.style.cssText = 'display: flex; flex-direction: column; width: 100%; gap: 0.6em; margin: 0.6em 0 0.6em 0';
+            newContainer.style.cssText = 'display: flex; flex-direction: column; width: 100%; gap: 0.8em; margin: 0.8em 0 0.8em 0';
             
             var firstRow = document.createElement('div');
-            firstRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin: 0 0 0.2em 0';
+            firstRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; margin: 0 0 0.4em 0';
             
             var secondRow = document.createElement('div');
-            secondRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin: 0 0 0.2em 0';
+            secondRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; margin: 0 0 0.4em 0';
             
             var thirdRow = document.createElement('div');
-            thirdRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin: 0 0 0.2em 0';
+            thirdRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; margin: 0 0 0.4em 0';
             
             if (isTvShow && movie && movie.seasons && Array.isArray(movie.seasons)) {
                 this.renderTvShowInfo(movie, firstRow, secondRow, thirdRow, originalDetails);
@@ -713,14 +1141,22 @@
                 if (genres.length > 1) {
                     genres.forEach(function(genre) {
                         genre = genre.trim();
-                        var color = self.colors.genres[genre] || { bg: 'rgba(255, 255, 255, 0.1)', text: 'white' };
+                        var color = self.colors.genres[genre] || { 
+                            bg: 'linear-gradient(135deg, rgba(128, 128, 128, 0.3), rgba(100, 100, 100, 0.3))', 
+                            text: '#888888',
+                            border: '#888888'
+                        };
                         var badge = self.createBadge(genre, color);
                         thirdRow.appendChild(badge);
                     });
                 } else {
                     var genre = text.trim();
                     if (genre) {
-                        var color = self.colors.genres[genre] || { bg: 'rgba(255, 255, 255, 0.1)', text: 'white' };
+                        var color = self.colors.genres[genre] || { 
+                            bg: 'linear-gradient(135deg, rgba(128, 128, 128, 0.3), rgba(100, 100, 100, 0.3))', 
+                            text: '#888888',
+                            border: '#888888'
+                        };
                         var badge = self.createBadge(genre, color);
                         thirdRow.appendChild(badge);
                     }
@@ -731,9 +1167,12 @@
         createBadge: function(text, colors) {
             var badge = document.createElement('span');
             badge.textContent = text;
-            badge.style.cssText = 'border-radius: 0.3em; border: 0px; font-size: 1.3em; padding: 0.2em 0.6em; ' +
-                'display: inline-block; white-space: nowrap; line-height: 1.2em; margin-right: 0.4em; ' +
-                'margin-bottom: 0.2em; background-color: ' + colors.bg + '; color: ' + colors.text + ';';
+            badge.style.cssText = 'border-radius: 20px; border: 1px solid ' + colors.border + '; font-size: 1.3em; padding: 0.4em 1em; ' +
+                'display: inline-block; white-space: nowrap; line-height: 1.4em; margin-right: 0.6em; ' +
+                'margin-bottom: 0.4em; background: ' + colors.bg + '; color: ' + colors.text + '; ' +
+                'box-shadow: 0 0 15px ' + colors.border.replace(')', ', 0.4)') + '; ' +
+                'text-shadow: 0 0 10px ' + colors.text + '; ' +
+                'backdrop-filter: blur(10px);';
             return badge;
         }
     };
@@ -797,29 +1236,35 @@
             
             var vote = parseFloat(match[0]);
             var color = '';
+            var glow = '';
             
             if (vote >= 0 && vote <= 3) {
-                color = 'red';
+                color = '#ff0000';
+                glow = '0 0 15px rgba(255, 0, 0, 0.8)';
             } else if (vote > 3 && vote < 6) {
-                color = 'orange';
+                color = '#ff8000';
+                glow = '0 0 15px rgba(255, 128, 0, 0.8)';
             } else if (vote >= 6 && vote < 8) {
-                color = 'cornflowerblue';
+                color = '#00ffff';
+                glow = '0 0 15px rgba(0, 255, 255, 0.8)';
             } else if (vote >= 8 && vote <= 10) {
-                color = 'lawngreen';
+                color = '#00ff80';
+                glow = '0 0 15px rgba(0, 255, 128, 0.8)';
             }
             
             if (color) {
                 element.style.color = color;
+                element.style.textShadow = glow;
             }
         },
         
         colorizeSeriesStatus: function() {
             var statusColors = {
-                completed: { bg: 'rgba(46, 204, 113, 0.8)', text: 'white' },
-                canceled: { bg: 'rgba(231, 76, 60, 0.8)', text: 'white' },
-                ongoing: { bg: 'rgba(243, 156, 18, 0.8)', text: 'black' },
-                production: { bg: 'rgba(52, 152, 219, 0.8)', text: 'white' },
-                planned: { bg: 'rgba(155, 89, 182, 0.8)', text: 'white' }
+                completed: { bg: 'linear-gradient(135deg, rgba(0, 255, 128, 0.3), rgba(0, 200, 100, 0.3))', text: '#00ff80', border: '#00ff80' },
+                canceled: { bg: 'linear-gradient(135deg, rgba(255, 0, 0, 0.3), rgba(200, 0, 0, 0.3))', text: '#ff0000', border: '#ff0000' },
+                ongoing: { bg: 'linear-gradient(135deg, rgba(255, 128, 0, 0.3), rgba(200, 100, 0, 0.3))', text: '#ff8000', border: '#ff8000' },
+                production: { bg: 'linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 200, 200, 0.3))', text: '#00ffff', border: '#00ffff' },
+                planned: { bg: 'linear-gradient(135deg, rgba(255, 0, 255, 0.3), rgba(200, 0, 200, 0.3))', text: '#ff00ff', border: '#ff00ff' }
             };
             
             var statusElements = document.querySelectorAll('.full-start__status');
@@ -827,28 +1272,36 @@
                 var statusText = element.textContent.trim();
                 var bgColor = '';
                 var textColor = '';
+                var borderColor = '';
                 
                 if (statusText.includes('Заверш') || statusText.includes('Ended')) {
                     bgColor = statusColors.completed.bg;
                     textColor = statusColors.completed.text;
+                    borderColor = statusColors.completed.border;
                 } else if (statusText.includes('Отмен') || statusText.includes('Canceled')) {
                     bgColor = statusColors.canceled.bg;
                     textColor = statusColors.canceled.text;
+                    borderColor = statusColors.canceled.border;
                 } else if (statusText.includes('Онгоинг') || statusText.includes('Выход') || 
                            statusText.includes('В процессе') || statusText.includes('Return')) {
                     bgColor = statusColors.ongoing.bg;
                     textColor = statusColors.ongoing.text;
+                    borderColor = statusColors.ongoing.border;
                 } else if (statusText.includes('производстве') || statusText.includes('Production')) {
                     bgColor = statusColors.production.bg;
                     textColor = statusColors.production.text;
+                    borderColor = statusColors.production.border;
                 } else if (statusText.includes('Запланировано') || statusText.includes('Planned')) {
                     bgColor = statusColors.planned.bg;
                     textColor = statusColors.planned.text;
+                    borderColor = statusColors.planned.border;
                 }
                 
                 if (bgColor) {
-                    element.style.cssText = 'background-color: ' + bgColor + '; color: ' + textColor + '; ' +
-                        'border-radius: 0.3em; border: 0px; font-size: 1.3em; display: inline-block;';
+                    element.style.cssText = 'background: ' + bgColor + '; color: ' + textColor + '; ' +
+                        'border-radius: 20px; border: 1px solid ' + borderColor + '; font-size: 1.3em; display: inline-block; ' +
+                        'padding: 0.4em 1em; box-shadow: 0 0 15px ' + borderColor.replace(')', ', 0.6)') + '; ' +
+                        'text-shadow: 0 0 10px ' + textColor + '; backdrop-filter: blur(10px);';
                 }
             });
         },
@@ -863,11 +1316,11 @@
             };
             
             var colors = {
-                kids: { bg: '#2ecc71', text: 'white' },
-                children: { bg: '#3498db', text: 'white' },
-                teens: { bg: '#f1c40f', text: 'black' },
-                almostAdult: { bg: '#e67e22', text: 'white' },
-                adult: { bg: '#e74c3c', text: 'white' }
+                kids: { bg: 'linear-gradient(135deg, rgba(0, 255, 128, 0.3), rgba(0, 200, 100, 0.3))', text: '#00ff80', border: '#00ff80' },
+                children: { bg: 'linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 200, 200, 0.3))', text: '#00ffff', border: '#00ffff' },
+                teens: { bg: 'linear-gradient(135deg, rgba(255, 255, 0, 0.3), rgba(200, 200, 0, 0.3))', text: '#ffff00', border: '#ffff00' },
+                almostAdult: { bg: 'linear-gradient(135deg, rgba(255, 128, 0, 0.3), rgba(200, 100, 0, 0.3))', text: '#ff8000', border: '#ff8000' },
+                adult: { bg: 'linear-gradient(135deg, rgba(255, 0, 0, 0.3), rgba(200, 0, 0, 0.3))', text: '#ff0000', border: '#ff0000' }
             };
             
             var ratingElements = document.querySelectorAll('.full-start__pg');
@@ -890,8 +1343,10 @@
                 }
                 
                 if (group) {
-                    element.style.cssText = 'background-color: ' + colors[group].bg + '; color: ' + colors[group].text + '; ' +
-                        'border-radius: 0.3em; font-size: 1.3em; border: 0px;';
+                    element.style.cssText = 'background: ' + colors[group].bg + '; color: ' + colors[group].text + '; ' +
+                        'border-radius: 20px; border: 1px solid ' + colors[group].border + '; font-size: 1.3em; ' +
+                        'padding: 0.4em 1em; box-shadow: 0 0 15px ' + colors[group].border.replace(')', ', 0.6)') + '; ' +
+                        'text-shadow: 0 0 10px ' + colors[group].text + '; backdrop-filter: blur(10px);';
                 }
             });
         }
@@ -930,25 +1385,32 @@
                 .watch-progress-widget {
                     display: flex;
                     align-items: center;
-                    background: rgba(30, 30, 30, 0.95);
-                    border-radius: 0.5em;
-                    padding: 1em;
-                    margin: 1em 0;
-                    transition: transform 0.3s ease, box-shadow 0.3s ease;
+                    background: linear-gradient(135deg, rgba(20, 20, 20, 0.9), rgba(40, 40, 40, 0.9));
+                    border-radius: 15px;
+                    padding: 1.5em;
+                    margin: 1.5em 0;
+                    border: 2px solid rgba(0, 255, 255, 0.3);
+                    box-shadow: 0 0 30px rgba(0, 255, 255, 0.3);
+                    backdrop-filter: blur(10px);
+                    transition: transform 0.2s ease, box-shadow 0.2s ease;
                 }
                 
-                .watch-progress-widget:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                .watch-progress-widget:hover,
+                .watch-progress-widget.focus {
+                    transform: translateY(-4px);
+                    box-shadow: 0 0 40px rgba(0, 255, 255, 0.5), 0 0 60px rgba(255, 0, 255, 0.3);
+                    border-color: #00ffff;
                 }
                 
                 .widget-poster {
                     position: relative;
-                    width: 120px;
-                    height: 180px;
-                    border-radius: 0.3em;
+                    width: 140px;
+                    height: 210px;
+                    border-radius: 10px;
                     overflow: hidden;
                     flex-shrink: 0;
+                    border: 2px solid rgba(255, 0, 255, 0.3);
+                    box-shadow: 0 0 20px rgba(255, 0, 255, 0.4);
                 }
                 
                 .widget-poster img {
@@ -962,62 +1424,73 @@
                     bottom: 0;
                     left: 0;
                     right: 0;
-                    background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
-                    padding: 0.5em;
+                    background: linear-gradient(to top, rgba(0, 0, 0, 0.95), transparent);
+                    padding: 0.8em;
                 }
                 
                 .progress-bar {
-                    height: 4px;
-                    background: #e50914;
-                    border-radius: 2px;
-                    margin-bottom: 0.3em;
+                    height: 5px;
+                    background: linear-gradient(90deg, #00ffff, #ff00ff);
+                    border-radius: 3px;
+                    margin-bottom: 0.4em;
+                    box-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
                     transition: width 0.3s ease;
                 }
                 
                 .progress-time {
-                    font-size: 0.9em;
-                    color: #fff;
+                    font-size: 1em;
+                    color: #00ffff;
+                    text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
                 }
                 
                 .widget-info {
                     flex: 1;
-                    padding: 0 1em;
+                    padding: 0 1.5em;
                 }
                 
                 .widget-info h3 {
-                    margin: 0 0 0.5em 0;
-                    font-size: 1.4em;
-                    color: #fff;
+                    margin: 0 0 0.6em 0;
+                    font-size: 1.6em;
+                    color: #00ffff;
+                    text-shadow: 0 0 15px rgba(0, 255, 255, 0.8);
                 }
                 
                 .widget-info p {
-                    margin: 0 0 1em 0;
-                    color: #aaa;
-                    font-size: 1.1em;
+                    margin: 0 0 1.2em 0;
+                    color: #ff00ff;
+                    font-size: 1.2em;
+                    text-shadow: 0 0 10px rgba(255, 0, 255, 0.6);
                 }
                 
                 .continue-btn {
                     display: inline-flex;
                     align-items: center;
-                    gap: 0.5em;
-                    padding: 0.7em 1.5em;
-                    background: #e50914;
+                    gap: 0.6em;
+                    padding: 0.8em 1.8em;
+                    background: linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(255, 0, 255, 0.3));
                     color: #fff;
-                    border: none;
-                    border-radius: 0.3em;
-                    font-size: 1.1em;
+                    border: 2px solid #00ffff;
+                    border-radius: 25px;
+                    font-size: 1.2em;
                     cursor: pointer;
-                    transition: background 0.3s ease;
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+                    text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+                    backdrop-filter: blur(10px);
+                    transition: all 0.2s ease;
                 }
                 
-                .continue-btn:hover {
-                    background: #f40612;
+                .continue-btn:hover,
+                .continue-btn.focus {
+                    transform: scale(1.05);
+                    box-shadow: 0 0 30px rgba(0, 255, 255, 0.8), 0 0 40px rgba(255, 0, 255, 0.6);
+                    border-color: #ff00ff;
                 }
                 
                 .continue-btn svg {
-                    width: 1.2em;
-                    height: 1.2em;
+                    width: 1.4em;
+                    height: 1.4em;
                     fill: currentColor;
+                    filter: drop-shadow(0 0 5px #00ffff);
                 }
                 
                 @media (max-width: 768px) {
@@ -1027,7 +1500,7 @@
                     }
                     
                     .widget-poster {
-                        margin-bottom: 1em;
+                        margin-bottom: 1.2em;
                     }
                     
                     .widget-info {
@@ -1140,12 +1613,12 @@
     };
 
     // ============================================================================
-    // NETFLIX ТЕМА
+    // НЕОНОВАЯ ТЕМА
     // ============================================================================
     
-    var NetflixTheme = {
+    var NeonTheme = {
         init: function() {
-            if (settings.theme !== 'netflix') {
+            if (settings.theme !== 'neon') {
                 this.remove();
                 return;
             }
@@ -1154,72 +1627,148 @@
         },
         
         addStyles: function() {
-            if (document.getElementById('netflix-theme-styles')) return;
+            if (document.getElementById('neon-theme-styles')) return;
             
             var style = document.createElement('style');
-            style.id = 'netflix-theme-styles';
+            style.id = 'neon-theme-styles';
             style.textContent = `
-                /* Netflix Theme Variables */
+                /* Neon Theme Variables */
                 :root {
-                    --netflix-bg-primary: #141414;
-                    --netflix-bg-secondary: #1f1f1f;
-                    --netflix-accent: #e50914;
-                    --netflix-text-primary: #ffffff;
-                    --netflix-text-secondary: #b3b3b3;
+                    --neon-bg-primary: #0a0a0a;
+                    --neon-bg-secondary: #151515;
+                    --neon-cyan: #00ffff;
+                    --neon-magenta: #ff00ff;
+                    --neon-yellow: #ffff00;
+                    --neon-green: #00ff80;
+                    --neon-red: #ff0040;
+                    --neon-text-primary: #ffffff;
+                    --neon-text-secondary: #b0b0b0;
                 }
                 
-                /* Background */
+                /* Background with grid */
                 body {
-                    background: var(--netflix-bg-primary);
-                    color: var(--netflix-text-primary);
+                    background: 
+                        linear-gradient(rgba(0, 255, 255, 0.02) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(255, 0, 255, 0.02) 1px, transparent 1px),
+                        linear-gradient(135deg, #0a0a0a 0%, #151515 100%);
+                    background-size: 50px 50px, 50px 50px, 100% 100%;
+                    color: var(--neon-text-primary);
                 }
                 
-                /* Cards */
+                /* Cards with neon glow */
                 .card {
-                    border-radius: 4px;
-                    transition: transform 0.3s ease, z-index 0s 0.3s;
+                    background: rgba(20, 20, 20, 0.8);
+                    border: 1px solid rgba(0, 255, 255, 0.2);
+                    border-radius: 10px;
+                    box-shadow: 0 0 10px rgba(0, 255, 255, 0.1);
+                    backdrop-filter: blur(10px);
+                    transition: all 0.2s ease;
                 }
                 
                 .card:hover,
                 .card.focus {
-                    transform: scale(1.15);
-                    z-index: 10;
-                    transition: transform 0.3s ease, z-index 0s 0s;
+                    transform: scale(1.08);
+                    border-color: var(--neon-cyan);
+                    box-shadow: 
+                        0 0 20px rgba(0, 255, 255, 0.6),
+                        0 0 40px rgba(0, 255, 255, 0.4),
+                        0 0 60px rgba(0, 255, 255, 0.2);
                 }
                 
-                .card__view::after {
-                    border: none !important;
-                    box-shadow: 0 0 0 2px var(--netflix-accent) !important;
+                .card__view {
+                    border-radius: 8px;
+                    overflow: hidden;
                 }
                 
-                /* Menu Items */
+                .card__title {
+                    color: var(--neon-cyan);
+                    text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+                }
+                
+                /* Menu with neon highlights */
+                .menu {
+                    background: rgba(15, 15, 15, 0.95);
+                    border-right: 2px solid rgba(0, 255, 255, 0.3);
+                    box-shadow: 0 0 30px rgba(0, 255, 255, 0.2);
+                    backdrop-filter: blur(15px);
+                }
+                
+                .menu__item {
+                    border-left: 3px solid transparent;
+                    transition: all 0.2s ease;
+                }
+                
                 .menu__item.focus,
-                .menu__item.traverse,
                 .menu__item.hover {
-                    background: var(--netflix-accent) !important;
-                    color: var(--netflix-text-primary) !important;
+                    background: linear-gradient(90deg, rgba(0, 255, 255, 0.2), transparent) !important;
+                    border-left-color: var(--neon-cyan) !important;
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
                 }
                 
-                /* Settings */
-                .settings-folder.focus,
-                .settings-param.focus,
-                .selectbox-item.focus {
-                    background: var(--netflix-accent) !important;
-                    color: var(--netflix-text-primary) !important;
+                .menu__ico {
+                    filter: drop-shadow(0 0 5px rgba(0, 255, 255, 0.5));
                 }
                 
-                /* Buttons */
+                .menu__item.focus .menu__ico,
+                .menu__item.hover .menu__ico {
+                    filter: drop-shadow(0 0 10px var(--neon-cyan)) drop-shadow(0 0 20px var(--neon-cyan));
+                }
+                
+                /* Buttons with neon style */
+                .full-start__button,
+                button,
+                .selector {
+                    background: linear-gradient(135deg, rgba(0, 255, 255, 0.15), rgba(255, 0, 255, 0.15));
+                    border: 2px solid rgba(0, 255, 255, 0.4);
+                    border-radius: 25px;
+                    color: var(--neon-cyan);
+                    text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+                    box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+                    backdrop-filter: blur(10px);
+                    transition: all 0.2s ease;
+                }
+                
+                .full-start__button:hover,
                 .full-start__button.focus,
-                .custom-online-btn.focus,
-                .custom-torrent-btn.focus,
-                .main2-more-btn.focus {
-                    background: var(--netflix-accent) !important;
-                    color: var(--netflix-text-primary) !important;
+                button:hover,
+                button.focus,
+                .selector.focus {
+                    background: linear-gradient(135deg, rgba(255, 0, 255, 0.25), rgba(0, 255, 255, 0.25));
+                    border-color: var(--neon-magenta);
+                    color: var(--neon-magenta);
+                    text-shadow: 0 0 15px rgba(255, 0, 255, 1);
+                    box-shadow: 
+                        0 0 20px rgba(255, 0, 255, 0.6),
+                        0 0 40px rgba(255, 0, 255, 0.4);
+                    transform: scale(1.05);
                 }
                 
-                /* Detail Page */
+                /* Settings with neon accents */
+                .settings {
+                    background: rgba(10, 10, 10, 0.95);
+                    backdrop-filter: blur(15px);
+                }
+                
+                .settings-folder,
+                .settings-param {
+                    border-bottom: 1px solid rgba(0, 255, 255, 0.1);
+                    transition: all 0.2s ease;
+                }
+                
+                .settings-folder.focus,
+                .settings-param.focus {
+                    background: linear-gradient(90deg, rgba(0, 255, 255, 0.15), transparent) !important;
+                    border-left: 3px solid var(--neon-cyan);
+                    box-shadow: 0 0 15px rgba(0, 255, 255, 0.2);
+                }
+                
+                /* Detail Page with cinematic neon effect */
+                .full-start {
+                    background: var(--neon-bg-primary);
+                }
+                
                 .full-start__background {
-                    opacity: 0.6;
+                    opacity: 0.4;
                 }
                 
                 .full-start::before {
@@ -1229,12 +1778,9 @@
                     left: 0;
                     right: 0;
                     bottom: 0;
-                    background: linear-gradient(
-                        to bottom,
-                        transparent 0%,
-                        rgba(20, 20, 20, 0.6) 60%,
-                        var(--netflix-bg-primary) 100%
-                    );
+                    background: 
+                        radial-gradient(ellipse at top, rgba(0, 255, 255, 0.15) 0%, transparent 70%),
+                        linear-gradient(to bottom, transparent 0%, rgba(10, 10, 10, 0.8) 70%, var(--neon-bg-primary) 100%);
                     z-index: 1;
                 }
                 
@@ -1243,52 +1789,106 @@
                     position: relative;
                 }
                 
-                /* Netflix Loader Animation */
-                .netflix-loader {
-                    width: 50px;
-                    height: 50px;
-                    border: 3px solid var(--netflix-accent);
-                    border-radius: 50%;
-                    border-top-color: transparent;
-                    animation: netflix-spin 1s linear infinite;
+                .full-start__title {
+                    color: var(--neon-cyan);
+                    text-shadow: 
+                        0 0 20px rgba(0, 255, 255, 0.8),
+                        0 0 40px rgba(0, 255, 255, 0.4);
                 }
                 
-                @keyframes netflix-spin {
-                    to {
-                        transform: rotate(360deg);
-                    }
+                .full-start__poster {
+                    border: 2px solid rgba(255, 0, 255, 0.4);
+                    border-radius: 10px;
+                    box-shadow: 
+                        0 0 30px rgba(255, 0, 255, 0.4),
+                        0 0 60px rgba(255, 0, 255, 0.2);
                 }
                 
                 /* Search Bar */
+                .search {
+                    background: rgba(20, 20, 20, 0.9);
+                    border-bottom: 2px solid rgba(0, 255, 255, 0.3);
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+                    backdrop-filter: blur(15px);
+                }
+                
                 .search input {
-                    background: var(--netflix-bg-secondary) !important;
-                    color: var(--netflix-text-primary) !important;
-                    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+                    background: rgba(30, 30, 30, 0.8) !important;
+                    color: var(--neon-cyan) !important;
+                    border: 1px solid rgba(0, 255, 255, 0.3) !important;
+                    border-radius: 25px;
+                    box-shadow: inset 0 0 15px rgba(0, 255, 255, 0.1);
+                    text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+                }
+                
+                .search input:focus {
+                    border-color: var(--neon-cyan) !important;
+                    box-shadow: 
+                        inset 0 0 15px rgba(0, 255, 255, 0.2),
+                        0 0 20px rgba(0, 255, 255, 0.4);
                 }
                 
                 /* Modal */
                 .modal__content,
                 .selectbox__content {
-                    background: var(--netflix-bg-secondary) !important;
-                    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+                    background: rgba(20, 20, 20, 0.95) !important;
+                    border: 2px solid rgba(0, 255, 255, 0.3) !important;
+                    border-radius: 15px;
+                    box-shadow: 0 0 40px rgba(0, 255, 255, 0.3);
+                    backdrop-filter: blur(20px);
                 }
                 
-                /* Text Colors */
-                .card__title,
-                .full-start__title {
-                    color: var(--netflix-text-primary) !important;
+                .modal__title {
+                    color: var(--neon-cyan);
+                    text-shadow: 0 0 15px rgba(0, 255, 255, 0.8);
                 }
                 
+                /* Scrollbar */
+                ::-webkit-scrollbar {
+                    width: 10px;
+                    height: 10px;
+                }
+                
+                ::-webkit-scrollbar-track {
+                    background: rgba(20, 20, 20, 0.5);
+                    border-radius: 5px;
+                }
+                
+                ::-webkit-scrollbar-thumb {
+                    background: linear-gradient(180deg, var(--neon-cyan), var(--neon-magenta));
+                    border-radius: 5px;
+                    box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+                }
+                
+                ::-webkit-scrollbar-thumb:hover {
+                    box-shadow: 0 0 15px rgba(0, 255, 255, 0.8);
+                }
+                
+                /* Loading animation */
+                .broadcast__scan {
+                    border-color: rgba(0, 255, 255, 0.2);
+                    border-top-color: var(--neon-cyan);
+                    box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+                }
+                
+                /* Text glow effects */
                 .card__vote,
                 .full-start__rate {
-                    color: var(--netflix-text-secondary) !important;
+                    text-shadow: 0 0 10px currentColor;
+                }
+                
+                /* Селектор сезонов/серий */
+                .selectbox-item.focus {
+                    background: linear-gradient(90deg, rgba(0, 255, 255, 0.2), transparent) !important;
+                    border-left: 3px solid var(--neon-cyan);
+                    box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
                 }
             `;
             document.head.appendChild(style);
         },
         
         remove: function() {
-            var style = document.getElementById('netflix-theme-styles');
+            var style = document.getElementById('neon-theme-styles');
             if (style) {
                 style.remove();
             }
@@ -1376,9 +1976,9 @@
                 type: 'select',
                 values: {
                     default: Lampa.Lang.translate('interface_mod_new_theme_default'),
-                    netflix: Lampa.Lang.translate('interface_mod_new_theme_netflix')
+                    neon: Lampa.Lang.translate('interface_mod_new_theme_neon')
                 },
-                default: 'default'
+                default: 'neon'
             },
             field: {
                 name: Lampa.Lang.translate('interface_mod_new_theme_select'),
@@ -1388,7 +1988,7 @@
                 settings.theme = value;
                 Lampa.Storage.set('interface_mod_new_theme_select', value);
                 Lampa.Settings.update();
-                NetflixTheme.init();
+                NeonTheme.init();
             }
         });
 
@@ -1406,108 +2006,149 @@
             },
             onChange: function(value) {
                 settings.watch_progress = value;
-                Lampa.Storage.set('interface_mod_new_watch_progress', value);
-                Lampa.Settings.update();
-                if (value) {
-                    WatchProgressWidget.renderWidget();
-                } else {
-                    var widget = document.querySelector('.watch-progress-widget');
-                    if (widget) widget.remove();
-                }
+Lampa.Storage.set('interface_mod_new_watch_progress', value);
+            Lampa.Settings.update();
+            if (value) {
+                WatchProgressWidget.renderWidget();
+            } else {
+                var widget = document.querySelector('.watch-progress-widget');
+                if (widget) widget.remove();
             }
-        });
+        }
+    });
 
-        // Настройка: Стилизация заголовков
-        Lampa.SettingsApi.addParam({
-            component: 'interface_mod_new',
-            param: {
-                name: 'interface_mod_new_stylize_titles',
-                type: 'trigger',
-                default: false
-            },
-            field: {
-                name: Lampa.Lang.translate('interface_mod_new_stylize_titles'),
-                description: Lampa.Lang.translate('interface_mod_new_stylize_titles_desc')
-            },
-            onChange: function(value) {
-                settings.stylize_titles = value;
-                Lampa.Storage.set('interface_mod_new_stylize_titles', value);
-                Lampa.Settings.update();
-                stylizeCollectionTitles();
-            }
-        });
-    }
-
-    // ============================================================================
-    // СТИЛИЗАЦИЯ ЗАГОЛОВКОВ
-    // ============================================================================
-    
-    function stylizeCollectionTitles() {
-        var oldStyle = document.getElementById('stylized-titles-css');
-        if (oldStyle) oldStyle.remove();
-        
-        if (!settings.stylize_titles) return;
-        
-        var styleElement = document.createElement('style');
-        styleElement.id = 'stylized-titles-css';
-        styleElement.textContent = `
-            .items-line__title {
-                font-size: 2.4em;
-                display: inline-block;
-                background: linear-gradient(45deg, #FF3CAC 0%, #784BA0 50%, #2B86C5 100%);
-                background-size: 200% auto;
-                background-clip: text;
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                animation: gradient-text 3s ease infinite;
-                font-weight: 800;
-                text-shadow: 0 1px 3px rgba(0,0,0,0.2);
-                position: relative;
-                padding: 0 5px;
-                z-index: 1;
-            }
-            
-            @keyframes gradient-text {
-                0% { background-position: 0% 50%; }
-                50% { background-position: 100% 50%; }
-                100% { background-position: 0% 50%; }
-            }
-        `;
-        document.head.appendChild(styleElement);
-    }
-
-    // ============================================================================
-    // ИНИЦИАЛИЗАЦИЯ
-    // ============================================================================
-    
-    function startPlugin() {
-        // Инициализируем централизованный наблюдатель
-        DOMWatcher.init();
-        
-        // Добавляем настройки
-        addSettings();
-        
-        // Инициализируем модули
-        LabelManager.init();
-        InfoPanel.init();
-        ColorManager.init();
-        WatchProgressWidget.init();
-        NetflixTheme.init();
-        
-        // Стилизация заголовков
-        if (settings.stylize_titles) {
+    // Настройка: Стилизация заголовков
+    Lampa.SettingsApi.addParam({
+        component: 'interface_mod_new',
+        param: {
+            name: 'interface_mod_new_stylize_titles',
+            type: 'trigger',
+            default: true
+        },
+        field: {
+            name: Lampa.Lang.translate('interface_mod_new_stylize_titles'),
+            description: Lampa.Lang.translate('interface_mod_new_stylize_titles_desc')
+        },
+        onChange: function(value) {
+            settings.stylize_titles = value;
+            Lampa.Storage.set('interface_mod_new_stylize_titles', value);
+            Lampa.Settings.update();
             stylizeCollectionTitles();
         }
-    }
+    });
 
-    // Запуск плагина
-    if (window.appready) {
-        startPlugin();
-    } else {
-        Lampa.Listener.follow('app', function(event) {
-            if (event.type === 'ready') {
-                startPlugin();
+    // Настройка: Ленивая загрузка
+    Lampa.SettingsApi.addParam({
+        component: 'interface_mod_new',
+        param: {
+            name: 'interface_mod_new_lazy_load',
+            type: 'trigger',
+            default: true
+        },
+        field: {
+            name: Lampa.Lang.translate('interface_mod_new_lazy_load'),
+            description: Lampa.Lang.translate('interface_mod_new_lazy_load_desc')
+        },
+        onChange: function(value) {
+            settings.lazy_load = value;
+            Lampa.Storage.set('interface_mod_new_lazy_load', value);
+            Lampa.Settings.update();
+            if (value) {
+                LazyLoader.init();
+            } else {
+                LazyLoader.destroy();
             }
-        });
+        }
+    });
+
+    // Настройка: WebP конвертация
+    Lampa.SettingsApi.addParam({
+        component: 'interface_mod_new',
+        param: {
+            name: 'interface_mod_new_webp_conversion',
+            type: 'trigger',
+            default: true
+        },
+        field: {
+            name: Lampa.Lang.translate('interface_mod_new_webp_conversion'),
+            description: Lampa.Lang.translate('interface_mod_new_webp_conversion_desc')
+        },
+        onChange: function(value) {
+            settings.webp_conversion = value;
+            Lampa.Storage.set('interface_mod_new_webp_conversion', value);
+            Lampa.Settings.update();
+        }
+    });
+}
+
+// ============================================================================
+// СТИЛИЗАЦИЯ ЗАГОЛОВКОВ
+// ============================================================================
+
+function stylizeCollectionTitles() {
+    var oldStyle = document.getElementById('stylized-titles-css');
+    if (oldStyle) oldStyle.remove();
+    
+    if (!settings.stylize_titles) return;
+    
+    var styleElement = document.createElement('style');
+    styleElement.id = 'stylized-titles-css';
+    styleElement.textContent = `
+        .items-line__title {
+            font-size: 2.4em;
+            display: inline-block;
+            background: linear-gradient(90deg, #00ffff, #ff00ff, #00ff80, #00ffff);
+            background-size: 200% auto;
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+            text-shadow: 
+                0 0 20px rgba(0, 255, 255, 0.5),
+                0 0 40px rgba(255, 0, 255, 0.3);
+            position: relative;
+            padding: 0 10px;
+            z-index: 1;
+            filter: drop-shadow(0 0 10px rgba(0, 255, 255, 0.6));
+        }
+    `;
+    document.head.appendChild(styleElement);
+}
+
+// ============================================================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================================================
+
+function startPlugin() {
+    // Инициализируем централизованный наблюдатель
+    DOMWatcher.init();
+    
+    // Добавляем настройки
+    addSettings();
+    
+    // Инициализируем модули
+    DPadNavigation.init();
+    LazyLoader.init();
+    LabelManager.init();
+    InfoPanel.init();
+    ColorManager.init();
+    WatchProgressWidget.init();
+    NeonTheme.init();
+    
+    // Стилизация заголовков
+    if (settings.stylize_titles) {
+        stylizeCollectionTitles();
     }
+}
+
+// Запуск плагина
+if (window.appready) {
+    startPlugin();
+} else {
+    Lampa.Listener.follow('app', function(event) {
+        if (event.type === 'ready') {
+            startPlugin();
+        }
+    });
+}
 })();
